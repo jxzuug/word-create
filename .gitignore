@@ -1,0 +1,10 @@
+node_modules/
+output/
+*.docx
+*.log
+*.json
+!.claude/skills/**/*.json
+!package.json
+!package-lock.json
+.DS_Store
+.idea/
