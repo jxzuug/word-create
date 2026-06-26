@@ -153,7 +153,7 @@ function createCoverPage(projectName, subtitle, companyName, dateStr) {
   return paragraphs;
 }
 
-function createTableSection(headers, rows, format = {}) {
+function createTableSection(headers, rows, caption, format = {}) {
   if (!headers || headers.length === 0) return [];
 
   const colCount = headers.length;
@@ -193,7 +193,18 @@ function createTableSection(headers, rows, format = {}) {
     },
   });
 
-  return [table, new Paragraph({ children: [], spacing: { after: 200 } })];
+  const elements = [];
+
+  // 表名
+  if (caption) {
+    elements.push(createParagraph(caption, {
+      size: 20, alignment: 'center', color: '555555', firstLineIndent: 0,
+    }));
+  }
+
+  elements.push(table);
+  elements.push(new Paragraph({ children: [], spacing: { after: 200 } }));
+  return elements;
 }
 
 function createListSection(items, listType = 'bullet') {
@@ -232,9 +243,12 @@ function estimateWordCount(chapters) {
             (item.rows || []).forEach(row =>
               (row || []).forEach(cell => count += String(cell).replace(/\s/g, '').length)
             );
+            count += (item.caption || '').replace(/\s/g, '').length;
             break;
           case 'image':
+          case 'placeholder':
             count += (item.caption || '').replace(/\s/g, '').length;
+            count += (item.title || '').replace(/\s/g, '').length;
             break;
         }
       }
@@ -254,8 +268,8 @@ function detectDuplicates(chapters) {
     if (!Array.isArray(ch.content)) continue;
     for (const item of ch.content) {
       if (item.type === 'paragraph' && item.text) {
-        // 取前20个字符作为key（避免标点符号差异导致误判）
-        const key = item.text.replace(/\s/g, '').substring(0, 20);
+        // 取前40个字符作为key（足够长以区分相似但不同的段落，如项目概述 vs 章节引言）
+        const key = item.text.replace(/\s/g, '').substring(0, 40);
         if (seen[key]) {
           duplicates.push({ first: seen[key], duplicate: item.text.substring(0, 60) + '...' });
         } else {
@@ -302,7 +316,7 @@ function buildContentFromChapter(chapter) {
         }
 
         case 'table': {
-          const tableElements = createTableSection(item.headers, item.rows, item.format);
+          const tableElements = createTableSection(item.headers, item.rows, item.caption, item.format);
           elements.push(...tableElements);
           break;
         }
@@ -332,6 +346,55 @@ function buildContentFromChapter(chapter) {
               }));
             }
           }
+          break;
+        }
+
+        case 'placeholder': {
+          // 图片占位符：生成带虚线边框的占位框 + 提示文字 + 图名
+          const pw = item.width || 500;
+          const ph = item.height || 350;
+          const placeholderTitle = item.title || '【此处插入图片】';
+          elements.push(new Paragraph({
+            children: [],
+            spacing: { before: 200, after: 0 },
+          }));
+          // 占位框 — 用单行表格模拟（虚线边框+浅灰底色）
+          const placeholderTable = new Table({
+            rows: [
+              new TableRow({
+                height: { value: Math.round(ph / 1.33), rule: 'atLeast' },
+                children: [
+                  new TableCell({
+                    children: [createParagraph(placeholderTitle, {
+                      size: 22, alignment: 'center', color: '888888',
+                    })],
+                    shading: { type: 'clear', fill: 'F5F5F5' },
+                    width: { size: Math.round(pw / 6), type: WidthType.DXA },
+                    verticalAlign: 'center',
+                  }),
+                ],
+              }),
+            ],
+            width: { size: Math.round(pw / 6), type: WidthType.DXA },
+            borders: {
+              top: { style: BorderStyle.DASHED, size: 2, color: '999999' },
+              bottom: { style: BorderStyle.DASHED, size: 2, color: '999999' },
+              left: { style: BorderStyle.DASHED, size: 2, color: '999999' },
+              right: { style: BorderStyle.DASHED, size: 2, color: '999999' },
+            },
+          });
+          elements.push(placeholderTable);
+          // 图片标题
+          if (item.caption) {
+            elements.push(createParagraph(item.caption, {
+              size: 20, alignment: 'center', color: '555555',
+              firstLineIndent: 0,
+            }));
+          }
+          elements.push(new Paragraph({
+            children: [],
+            spacing: { after: 200 },
+          }));
           break;
         }
 
@@ -379,7 +442,12 @@ function buildDocument(data) {
   children.push(new Paragraph({ children: [new PageBreak()] }));
 
   // ---- 正文 ----
-  for (const chapter of chapters) {
+  for (let i = 0; i < chapters.length; i++) {
+    const chapter = chapters[i];
+    // 非首章：在新页开始
+    if (i > 0) {
+      children.push(new Paragraph({ children: [new PageBreak()], spacing: { after: 0 } }));
+    }
     const chapterElements = buildContentFromChapter(chapter);
     children.push(...chapterElements);
 
@@ -452,7 +520,7 @@ function buildDocument(data) {
         headers: {
           default: new Header({
             children: [new Paragraph({
-              children: [createTextRun('施工组织设计', { size: 18, color: '888888' })],
+              children: [createTextRun(subtitle || projectName || '施工组织设计', { size: 18, color: '888888' })],
               alignment: AlignmentType.RIGHT,
             })],
           }),
@@ -536,8 +604,32 @@ function main() {
 
 async function generateDoc(data, outputPath) {
   try {
-    const totalChapters = (data.chapters || []).length;
-    const totalChars = estimateWordCount(data.chapters || []);
+    // === JSON 输入验证 ===
+    const chapters = data.chapters || [];
+    if (chapters.length === 0) {
+      console.warn('⚠️  警告：chapters 数组为空，文档将只有封面和目录');
+    }
+    let validationErrors = [];
+    chapters.forEach((ch, i) => {
+      if (!ch.title) validationErrors.push(`第${i+1}章缺少 title 字段`);
+      if (!Array.isArray(ch.content)) validationErrors.push(`第${i+1}章(${ch.title||'未知'})缺少 content 数组`);
+      if (Array.isArray(ch.content)) {
+        ch.content.forEach((item, j) => {
+          if (!item.type) validationErrors.push(`第${i+1}章 content[${j}] 缺少 type 字段`);
+          if (item.type === 'paragraph' && !item.text) validationErrors.push(`第${i+1}章 content[${j}] paragraph 缺少 text`);
+          if (item.type === 'table' && (!item.headers || !item.rows)) validationErrors.push(`第${i+1}章 content[${j}] table 缺少 headers 或 rows`);
+        });
+      }
+    });
+    if (validationErrors.length > 0) {
+      console.warn('⚠️  JSON 数据校验发现问题:');
+      validationErrors.slice(0, 8).forEach(e => console.warn(`   - ${e}`));
+      if (validationErrors.length > 8) console.warn(`   ... 还有 ${validationErrors.length - 8} 个问题`);
+    }
+    // === 校验结束 ===
+
+    const totalChapters = chapters.length;
+    const totalChars = estimateWordCount(chapters);
     console.log('📄 正在生成文档...');
     console.log(`   章节: ${totalChapters} 章, 字数: 约 ${totalChars} 字`);
     if (totalChars > 50000) {
@@ -588,8 +680,17 @@ async function generateDoc(data, outputPath) {
       return sum + subs + 1;
     }, 0);
     const avgWordsPerSection = Math.round(wordCount / Math.max(1, sectionCount));
+    // 统计表格和占位符数量
+    const tableCount = chapters.reduce((sum, ch) => {
+      return sum + (ch.content || []).filter(c => c.type === 'table').length;
+    }, 0);
+    const placeholderCount = chapters.reduce((sum, ch) => {
+      return sum + (ch.content || []).filter(c => c.type === 'placeholder').length;
+    }, 0);
     console.log(`   子章节数: ${sectionCount} 个`);
     console.log(`   平均每子章节: 约 ${avgWordsPerSection} 字`);
+    console.log(`   表格数: ${tableCount} 个（每子章节 ${(tableCount / Math.max(1, sectionCount)).toFixed(1)} 个）`);
+    console.log(`   图片占位符: ${placeholderCount} 个`);
 
     // 如果设置了目标字数或每节字数，给出对比
     if (data.targetWordCount) {
@@ -601,6 +702,21 @@ async function generateDoc(data, outputPath) {
     if (data.targetWordsPerSection) {
       console.log(`   目标每子章节: ${data.targetWordsPerSection} 字`);
     }
+
+    // === 智能建议 ===
+    if (data.targetWordCount) {
+      const pct = Math.round((wordCount / data.targetWordCount) * 100);
+      const diff = wordCount - data.targetWordCount;
+      if (pct < 85) {
+        const neededChars = Math.abs(diff);
+        const neededSubsections = Math.ceil(neededChars / 3500);
+        console.log(`   💡 建议：当前完成度 ${pct}%，建议补充约 ${neededChars} 字（约 ${neededSubsections} 个子章节）`);
+      }
+    }
+    if (avgWordsPerSection < 2000 && sectionCount > 0) {
+      console.log(`   💡 建议：平均每子章节 ${avgWordsPerSection} 字偏低，可增加各子章节的细节深度`);
+    }
+    // === 建议结束 ===
 
     console.log(`   ${'='.repeat(30)}`);
   } catch (e) {
